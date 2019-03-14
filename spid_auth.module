@@ -228,6 +228,10 @@ function spid_auth_loginpage()
             $options['saml:idp'] = $_REQUEST['register_id'];
         } elseif ((isset($_REQUEST['namirial_id']) && $_REQUEST['namirial_id'])) {
             $options['saml:idp'] = $_REQUEST['namirial_id'];
+        } elseif ((isset($_REQUEST['intesa_id']) && $_REQUEST['intesa_id'])) {
+            $options['saml:idp'] = $_REQUEST['intesa_id'];
+        } elseif ((isset($_REQUEST['lepida_id']) && $_REQUEST['lepida_id'])) {
+            $options['saml:idp'] = $_REQUEST['lepida_id'];
         } else {
             drupal_set_message(t('We\'re sorry. There was a problem. The issue has been logged for the administrator.'));
             drupal_goto('<front>');
@@ -333,7 +337,9 @@ function spid_auth_init()
                         if ($user) {
                             // Populate roles based on configuration setting.
                             $roles = _spid_auth_rolepopulation(variable_get('spid_auth_rolepopulation', ''));
-                            $userinfo = array('roles' => $roles);
+                            $userinfo = array(
+                                'roles' => $roles
+                            );
                             $user = user_save($user, $userinfo); // @todo - Fjernet rolle-delen her da den gav en bra feilmelding når roller ikke finnes ;)
                         }
                     } else {
@@ -353,7 +359,9 @@ function spid_auth_init()
                         // Populate roles based on configuration setting.
                         _simplesaml_auth_debug(t('User already registered [%authname] updating roles.', array('%authname' => $authname)));
                         $roles = _spid_auth_rolepopulation(variable_get('spid_auth_rolepopulation', ''));
-                        $userinfo = array('roles' => $roles);
+                        $userinfo = array(
+                            'roles' => $roles
+                        );
 
                         // Save the updated roles and populate the user object.
                         $user = user_save($ext_user, $userinfo);
@@ -366,7 +374,8 @@ function spid_auth_init()
                         rules_invoke_event('spid_auth_rules_event_login', $user);
                     }
                 }
-
+                // aggiunge i campi modificati o mancanti 
+                _spid_auth_cerca_altridati($user);
                 // Finalizing the login, calls hook_user op login.
                 $edit = array();
                 user_login_finalize($edit);
@@ -430,6 +439,8 @@ function spid_auth_init()
  */
 function spid_auth_user_insert(&$edit, $account, $category = NULL)
 {
+
+
     global $_simplesamlphp_auth_as;
     global $_simplesamlphp_auth_saml_attributes;
 
@@ -477,8 +488,104 @@ function spid_auth_user_insert(&$edit, $account, $category = NULL)
             }
 
             _simplesaml_auth_debug(t('Updating mail [%mailaddr]', array('%mailaddr' => $mail_address)));
+
+            //drupal_set_message('<pre>' . var_export($cittadino, 1) . '</pre>');
+
+            _spid_auth_cerca_altridati($account);
         }
     }
+}
+
+function _spid_auth_cerca_altridati($account)
+{
+
+    $conversione = _spid_auth_vettore_conversione();
+
+    foreach (is_array($conversione) ? $conversione : array() as $campo => $valore) {
+        $valorecampo = _spid_auth_get_campo($campo, $account);
+        if (db_table_exists("field_data_field_" . $campo) && db_table_exists("field_revision_field_" . $campo) && $valorecampo) {
+            _spid_auth_scrivi_altridati($campo, $account, $valorecampo);
+        }
+    }
+
+    cache_clear_all("field:user:" . $account->uid, "cache_field");
+}
+
+function _spid_auth_vettore_conversione()
+{
+    global $user;
+    $idcorrente = $user->uid;
+
+    $cittadino = user_load($idcorrente);
+    $conversione = array();
+    foreach (((is_array($cittadino) || is_object($cittadino)) ? $cittadino : array()) as $chiave => $valore) {
+
+        if (substr($chiave, 0, 6) === "field_") {
+            $str = lcfirst(str_replace('_', '', ucwords(substr($chiave, 6), '_')));
+            $conversione[substr($chiave, 6)] = $str;
+        }
+    }
+//    drupal_set_message('<pre>' . var_export($conversione, 1) . '</pre>');
+
+    return $conversione;
+}
+
+function _spid_auth_scrivi_altridati($tipo, $account, $valorecampo)
+{
+
+    $lang_name = "und";
+
+    $num_deleted = db_delete('field_data_field_' . $tipo)
+            ->condition('entity_type', 'user')
+            ->condition('bundle', 'user')
+            ->condition('deleted', 0)
+            ->condition('entity_id', $account->uid)
+            ->condition('revision_id', $account->uid)
+            ->condition('delta', 0)
+            ->execute();
+
+
+    db_insert('field_data_field_' . $tipo)
+            ->fields(
+                    array(
+                        "entity_type" => "user",
+                        "bundle" => "user",
+                        "deleted" => 0,
+                        "entity_id" => $account->uid,
+                        "revision_id" => $account->uid,
+                        "language" => $lang_name,
+                        "delta" => 0,
+                        "field_" . $tipo . "_value" => $valorecampo
+                    )
+            )
+            ->execute();
+
+
+    $num_deleted = db_delete('field_revision_field_' . $tipo)
+            ->condition('entity_type', 'user')
+            ->condition('bundle', 'user')
+            ->condition('deleted', 0)
+            ->condition('entity_id', $account->uid)
+            ->condition('revision_id', $account->uid)
+            ->condition('delta', 0)
+            ->execute();
+
+
+
+    db_insert('field_revision_field_' . $tipo)
+            ->fields(
+                    array(
+                        "entity_type" => "user",
+                        "bundle" => "user",
+                        "deleted" => 0,
+                        "entity_id" => $account->uid,
+                        "revision_id" => $account->uid,
+                        "language" => $lang_name,
+                        "delta" => 0,
+                        "field_" . $tipo . "_value" => $valorecampo
+                    )
+            )
+            ->execute();
 }
 
 /**
@@ -619,8 +726,18 @@ function spid_auth_settings()
         '#default_value' => variable_get('spid_auth_authsource_namirial'),
         '#description' => t('The name of the namirial_id from /var/simplesamlphp/config/authsources.php'),
     );
-
-
+    $form['spid_auth_grp_setup']['spid_auth_authsource_intesa'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Autenticaton id for Intesa'),
+        '#default_value' => variable_get('spid_auth_authsource_intesa'),
+        '#description' => t('The name of the intesa_id from /var/simplesamlphp/config/authsources.php'),
+    );
+    $form['spid_auth_grp_setup']['spid_auth_authsource_lepida'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Autenticaton id for Lepida'),
+        '#default_value' => variable_get('spid_auth_authsource_lepida'),
+        '#description' => t('The name of the lepida_id from /var/simplesamlphp/config/authsources.php'),
+    );
     $form['spid_auth_grp_setup']['spid_auth_forcehttps'] = array(
         '#type' => 'checkbox',
         '#title' => t('Force https for login links'),
@@ -877,6 +994,32 @@ function _spid_auth_get_default_name($account)
         $default_name = $_simplesamlphp_auth_saml_attributes['name'][0] . ' ' . $_simplesamlphp_auth_saml_attributes['familyName'][0];
     }
     return $default_name;
+}
+
+/**
+ * Gets the cognome attribute.
+ *
+ * @return
+ *   The cognome attribute.
+ */
+function _spid_auth_get_campo($tipo, $account)
+{
+
+    $conversione = _spid_auth_vettore_conversione();
+
+    global $_simplesamlphp_auth_as;
+    global $_simplesamlphp_auth_saml_attributes;
+    $risposta = '';
+    // Check if valid local session exists..
+    if ($_simplesamlphp_auth_as->isAuthenticated()) {
+        if (isset($_simplesamlphp_auth_saml_attributes[$conversione[$tipo]])) {
+            $risposta = $_simplesamlphp_auth_saml_attributes[$conversione[$tipo]][0];
+        } else {
+            throw new Exception(t('Error in spid_auth.module: No valid ' . $conversione[$tipo] . ' attribute set.'));
+        }
+    }
+
+    return $risposta;
 }
 
 /**
@@ -1195,6 +1338,11 @@ function _spid_auth_spidbutton()
     $spid_idp_namirialid_svg = url(drupal_get_path('module', "spid_auth") . '/vendor/agid/img/spid-idp-namirialid.svg');
     $spid_idp_namirialid_png = url(drupal_get_path('module', "spid_auth") . '/vendor/agid/img/spid-idp-namirialid.png');
 
+    $spid_idp_intesaid_svg = url(drupal_get_path('module', "spid_auth") . '/vendor/agid/img/spid-idp-intesaid.svg');
+    $spid_idp_intesaid_png = url(drupal_get_path('module', "spid_auth") . '/vendor/agid/img/spid-idp-intesaid.png');
+
+    $spid_idp_lepidaid_svg = url(drupal_get_path('module', "spid_auth") . '/vendor/agid/img/spid-idp-lepidaid.svg');
+    $spid_idp_lepidaid_png = url(drupal_get_path('module', "spid_auth") . '/vendor/agid/img/spid-idp-lepidaid.png');
 
     $infocert_id = variable_get('spid_auth_authsource_infocert');
     $poste_id = variable_get('spid_auth_authsource_poste');
@@ -1203,6 +1351,8 @@ function _spid_auth_spidbutton()
     $aruba_id = variable_get('spid_auth_authsource_aruba');
     $register_id = variable_get('spid_auth_authsource_register');
     $namirial_id = variable_get('spid_auth_authsource_namirial');
+    $intesa_id = variable_get('spid_auth_authsource_intesa');
+    $lepida_id = variable_get('spid_auth_authsource_lepida');
 
     $formaction = url('saml_login', array('absolute' => true));
 
@@ -1235,7 +1385,12 @@ function _spid_auth_spidbutton()
                 <li class="spid-idp-button-link">
                     <button class="idp-button-idp-logo" name="namirial_id" type="submit" value="$namirial_id"><span class="spid-sr-only">Namirial ID</span><img class="spid-idp-button-logo" src="$spid_idp_namirialid_svg" onerror="this.src='$spid_idp_namirialid_png'; this.onerror=null;" alt="Namirial ID" /></button>
                 </li>  
-   
+                <li class="spid-idp-button-link">
+                    <button class="idp-button-idp-logo" name="intesa_id" type="submit" value="$intesa_id"><span class="spid-sr-only">Intesa ID</span><img class="spid-idp-button-logo" src="$spid_idp_intesaid_svg" onerror="this.src='$spid_idp_intesaid_png'; this.onerror=null;" alt="Intesa ID" /></button>
+                </li>     
+                <li class="spid-idp-button-link" data-idp="lepidaid">
+                    <button class="idp-button-idp-logo" name="lepida_id" type="submit" value="$lepida_id"><span class="spid-sr-only">Lepida ID</span><img class="spid-idp-button-logo" src="$spid_idp_lepidaid_svg" onerror="this.src='$spid_idp_lepidaid_png'; this.onerror=null;" alt="Lepida ID" /></button>
+                </li>
                 <li class="spid-idp-support-link">
                     <a href="http://www.spid.gov.it">Maggiori info</a>
                 </li>
